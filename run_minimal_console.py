@@ -24,11 +24,10 @@ import warnings
 import pandas as pd
 import numpy as np  # NEW: For numeric operations
 
-# Configure logging
+# Configure logging - simplified for cleaner console output
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
+    level=logging.WARNING,  # Only show warnings and errors by default
+    format='%(message)s'  # Simpler format without timestamps
 )
 logger = logging.getLogger(__name__)
 
@@ -73,6 +72,18 @@ PREBUILT_DIR = Path("reports/prebuilt_metrics")
 DEFAULT_WINDOW_DAYS = 90
 GIT_FALLBACK_PATH = r"C:\Program Files\Git\bin\git.exe"
 AUTO_PUSH_ENABLED = True
+VERBOSE_MODE = False  # Global flag for verbose output
+
+
+def vprint(*args, **kwargs):
+    """Verbose print - only prints if VERBOSE_MODE is True."""
+    if VERBOSE_MODE:
+        print(*args, **kwargs)
+
+
+def uprint(*args, **kwargs):
+    """User print - always prints (for important user-facing messages)."""
+    print(*args, **kwargs)
 
 
 @dataclass
@@ -207,25 +218,25 @@ def run_backtest_date_range(
     """
     Run backtest for a specific date range.
     """
-    logger.info(f"\n{'='*60}")
-    logger.info(f"BACKTEST MODE: Date Range")
-    logger.info(f"Window: {start_date.strftime('%d-%m-%y')} → {end_date.strftime('%d-%m-%y')}")
-    logger.info(f"Auto-generate missing predictions: {'ON' if auto_generate_missing else 'OFF'}")
-    logger.info(f"AB cutoff: {ab_cutoff}")
-    logger.info(f"{'='*60}")
+    uprint(f"\n{'='*60}")
+    uprint(f"BACKTEST MODE: Date Range")
+    uprint(f"Window: {start_date.strftime('%d-%m-%y')} → {end_date.strftime('%d-%m-%y')}")
+    uprint(f"Auto-generate missing predictions: {'ON' if auto_generate_missing else 'OFF'}")
+    uprint(f"AB cutoff: {ab_cutoff}")
+    uprint(f"{'='*60}")
     
     # Load results data
-    logger.debug("Loading results dataframe...")
+    vprint("Loading results dataframe...")
     results_df = load_results_dataframe()
     results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
-    logger.debug(f"Loaded {len(results_df)} rows from results file")
+    vprint(f"Loaded {len(results_df)} rows from results file")
     
     # Filter out month-end dates
     before_filter = len(results_df)
     results_df = results_df[~results_df["DATE"].apply(_is_month_end)]
     after_filter = len(results_df)
     if before_filter != after_filter:
-        logger.debug(f"Filtered out {before_filter - after_filter} month-end dates")
+        vprint(f"Filtered out {before_filter - after_filter} month-end dates")
     
     # Filter out rows with NaN in slot columns
     slot_columns = list(SLOT_NAME_TO_ID.keys())
@@ -233,27 +244,27 @@ def run_backtest_date_range(
     results_df = results_df.dropna(subset=slot_columns)
     after_nan_filter = len(results_df)
     if before_nan_filter != after_nan_filter:
-        logger.debug(f"Filtered out {before_nan_filter - after_nan_filter} rows with NaN slots")
+        vprint(f"Filtered out {before_nan_filter - after_nan_filter} rows with NaN slots")
     
     if results_df.empty:
-        logger.error("ERROR: No usable result dates available")
+        uprint("ERROR: No usable result dates available")
         return
     
     # Filter by date range
     mask = (results_df["DATE"] >= start_date) & (results_df["DATE"] <= end_date)
     date_range_df = results_df[mask]
-    logger.debug(f"Filtered to date range: {len(date_range_df)} rows")
+    vprint(f"Filtered to date range: {len(date_range_df)} rows")
     
     if date_range_df.empty:
-        logger.error(f"ERROR: No results available in date range {start_date.strftime('%d-%m-%y')} to {end_date.strftime('%d-%m-%y')}")
+        uprint(f"ERROR: No results available in date range {start_date.strftime('%d-%m-%y')} to {end_date.strftime('%d-%m-%y')}")
         return
     
     # Get available dates in range
     available_dates = sorted(date_range_df["DATE"].unique())
     total_days = len(available_dates)
     
-    logger.info(f"Backtest window: {start_date.strftime('%d-%m-%y')} → {end_date.strftime('%d-%m-%y')}")
-    logger.info(f"Days to process: {total_days}")
+    uprint(f"Backtest window: {start_date.strftime('%d-%m-%y')} → {end_date.strftime('%d-%m-%y')}")
+    uprint(f"Days to process: {total_days}")
     
     # Try to load K-AUTO map from historical metrics
     cfg = PnLConfig()
@@ -261,27 +272,27 @@ def run_backtest_date_range(
     k_auto_map = {slot_id: MAX_PICKS_CAP_DEFAULT for slot_id in SLOT_NAME_MAP.keys()}
     
     try:
-        logger.debug("Loading K-AUTO map from historical metrics...")
+        vprint("Loading K-AUTO map from historical metrics...")
         # Get effective dates for metrics calculation
         effective_dates = build_effective_dates(start_date, end_date, available_dates=available_dates)
-        logger.debug(f"Effective dates for metrics: {len(effective_dates)} dates")
+        vprint(f"Effective dates for metrics: {len(effective_dates)} dates")
         
         # Load bet rows to calculate K-AUTO
         bet_rows = load_clean_bet_rows(start_date, end_date, cfg)
-        logger.debug(f"Loaded {len(bet_rows)} bet rows for K-AUTO calculation")
+        vprint(f"Loaded {len(bet_rows)} bet rows for K-AUTO calculation")
         
         if not bet_rows.empty:
             _, loaded_k_auto_map = format_rank_bucket_windows(bet_rows, effective_dates)
             if loaded_k_auto_map:
                 k_auto_map.update(loaded_k_auto_map)  # Update with loaded values
-                logger.info(f"K-AUTO limits loaded: {', '.join([f'{SLOT_NAME_MAP[sid]}={cap}' for sid, cap in k_auto_map.items()])}")
+                vprint(f"K-AUTO limits loaded: {', '.join([f'{SLOT_NAME_MAP[sid]}={cap}' for sid, cap in k_auto_map.items()])}")
         else:
-            logger.warning(f"⚠️  No bet history available for K-AUTO calculation, using default cap of {MAX_PICKS_CAP_DEFAULT}")
+            vprint(f"⚠️  No bet history available for K-AUTO calculation, using default cap of {MAX_PICKS_CAP_DEFAULT}")
     except Exception as e:
-        logger.warning(f"⚠️  Warning: Could not load K-AUTO map: {e}")
-        logger.warning(f"    Using default cap of {MAX_PICKS_CAP_DEFAULT} for all slots")
+        vprint(f"⚠️  Warning: Could not load K-AUTO map: {e}")
+        vprint(f"    Using default cap of {MAX_PICKS_CAP_DEFAULT} for all slots")
     
-    logger.info("-" * 60)
+    uprint("-" * 60)
     
     project_root = Path(__file__).resolve().parent
 
@@ -2151,14 +2162,19 @@ Examples:
     
     args = parser.parse_args()
 
-    global AUTO_PUSH_ENABLED
+    global AUTO_PUSH_ENABLED, VERBOSE_MODE
     AUTO_PUSH_ENABLED = not args.no_push
     
-    # Set logging level based on verbose flag
+    # Set logging level and verbose mode based on verbose flag
     if args.verbose:
+        VERBOSE_MODE = True
         logger.setLevel(logging.DEBUG)
         logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Verbose logging enabled")
+        vprint("Verbose logging enabled")
+    else:
+        VERBOSE_MODE = False
+        logger.setLevel(logging.WARNING)
+        logging.getLogger().setLevel(logging.WARNING)
     
     # Track if script executed successfully
     success = False
@@ -2204,14 +2220,14 @@ def handle_backtest_mode(args) -> None:
     sanity_tests(args.auto_generate_missing, args.ab_cutoff, args.scr_timeout, args.scr_retries)
     # Interactive mode - no args provided
     if args.last is None and args.start is None and args.end is None:
-        logger.info(f"\n{'='*60}")
-        logger.info("BACKTEST - INTERACTIVE MODE")
-        logger.info(f"{'='*60}\n")
+        uprint(f"\n{'='*60}")
+        uprint("BACKTEST - INTERACTIVE MODE")
+        uprint(f"{'='*60}\n")
         
-        logger.info("Select backtest option:")
-        logger.info("  [1] Last N days")
-        logger.info("  [2] Custom date range (DD-MM-YY)")
-        logger.info("  [3] Cancel")
+        uprint("Select backtest option:")
+        uprint("  [1] Last N days")
+        uprint("  [2] Custom date range (DD-MM-YY)")
+        uprint("  [3] Cancel")
         
         choice = input("\nEnter choice (1-3): ").strip()
         
@@ -2228,7 +2244,7 @@ def handle_backtest_mode(args) -> None:
                     scr_retries=args.scr_retries,
                 )
             except ValueError:
-                logger.error("ERROR: Invalid number of days")
+                uprint("ERROR: Invalid number of days")
                 sys.exit(1)
         elif choice == "2":
             try:
@@ -2249,13 +2265,13 @@ def handle_backtest_mode(args) -> None:
                     scr_retries=args.scr_retries,
                 )
             except ValueError as e:
-                logger.error(f"ERROR: {e}")
+                uprint(f"ERROR: {e}")
                 sys.exit(1)
         elif choice == "3":
-            logger.info("Cancelled")
+            uprint("Cancelled")
             sys.exit(0)
         else:
-            logger.error("ERROR: Invalid choice")
+            uprint("ERROR: Invalid choice")
             sys.exit(1)
         return
     
@@ -2276,14 +2292,14 @@ def handle_backtest_mode(args) -> None:
                 scr_retries=args.scr_retries,
             )
         except ValueError as e:
-            logger.error(f"ERROR: {e}")
+            uprint(f"ERROR: {e}")
             sys.exit(1)
         return
     
     # Last N days mode
     if args.last is not None:
         if args.last <= 0:
-            logger.error("ERROR: --last must be a positive integer")
+            uprint("ERROR: --last must be a positive integer")
             sys.exit(1)
         run_backtest(
             args.last,
@@ -2296,11 +2312,11 @@ def handle_backtest_mode(args) -> None:
         return
     
     # Invalid combination
-    logger.error("ERROR: --backtest requires either --last N or --start and --end")
-    logger.info("Usage examples:")
-    logger.info("  python run_minimal_console.py --backtest --last 30")
-    logger.info("  python run_minimal_console.py --backtest --start 01-06-25 --end 18-07-25")
-    logger.info("  python run_minimal_console.py --backtest  # Interactive mode")
+    uprint("ERROR: --backtest requires either --last N or --start and --end")
+    uprint("Usage examples:")
+    uprint("  python run_minimal_console.py --backtest --last 30")
+    uprint("  python run_minimal_console.py --backtest --start 01-06-25 --end 18-07-25")
+    uprint("  python run_minimal_console.py --backtest  # Interactive mode")
     sys.exit(1)
 
 def handle_future_generation_mode(args) -> None:
@@ -2335,7 +2351,7 @@ def handle_future_generation_mode(args) -> None:
 
             last_prediction_date = get_last_prediction_date()
             last_results_date = _get_latest_result_date()
-            logger.info(
+            vprint(
                 "Auto start inputs: last_prediction=%s, last_results=%s",
                 _format_ddmmyy(last_prediction_date) if last_prediction_date else "n/a",
                 _format_ddmmyy(last_results_date) if last_results_date else "n/a",
@@ -2347,26 +2363,26 @@ def handle_future_generation_mode(args) -> None:
             if _is_valid_date(last_results_date):
                 start_candidates.append(last_results_date + dt.timedelta(days=1))
             if not start_candidates:
-                logger.error("Bad date inference")
+                uprint("ERROR: Cannot determine start date - no existing predictions or results found")
                 return
 
             start_date = max(start_candidates)
 
             if not _is_valid_date(start_date) or not _is_valid_date(end_date):
-                logger.error("Bad date inference")
+                uprint("ERROR: Invalid date range")
                 return
 
-            logger.info(
+            vprint(
                 "Resolved auto range: start=%s, end=%s",
                 _format_ddmmyy(start_date),
                 _format_ddmmyy(end_date),
             )
 
             if end_date < start_date:
-                logger.info("Already up to date; nothing to generate.")
+                uprint("Already up to date; nothing to generate.")
                 return
 
-            logger.info(
+            uprint(
                 f"📅 Generating predictions from {_format_ddmmyy(start_date)} to {_format_ddmmyy(end_date)}"
             )
 
@@ -2383,7 +2399,7 @@ def handle_future_generation_mode(args) -> None:
                 scr_retries=args.scr_retries,
             )
         except ValueError as e:
-            logger.error(f"ERROR: {e}")
+            uprint(f"ERROR: {e}")
             sys.exit(1)
         return
     
@@ -2394,9 +2410,9 @@ def handle_future_generation_mode(args) -> None:
             _maybe_rebuild_metrics(log_skip=True)
         
         # Interactive menu
-        logger.info(f"\n{'='*60}")
-        logger.info("GENERATE FUTURE PREDICTIONS - AUTO-DETECT MODE")
-        logger.info(f"{'='*60}\n")
+        uprint(f"\n{'='*60}")
+        uprint("GENERATE FUTURE PREDICTIONS - AUTO-DETECT MODE")
+        uprint(f"{'='*60}\n")
         
         try:
             # Auto-detect last dates
@@ -2406,20 +2422,20 @@ def handle_future_generation_mode(args) -> None:
             last_prediction_date = get_last_prediction_date()
             
             if not _is_valid_date(latest_excel_date):
-                logger.error("Bad date inference")
+                uprint("ERROR: Cannot determine latest result date")
                 sys.exit(1)
 
-            logger.info(f"Latest Excel data: {_format_ddmmyy(latest_excel_date)}")
+            uprint(f"Latest Excel data: {_format_ddmmyy(latest_excel_date)}")
             if last_prediction_date:
-                logger.info(f"Last prediction:   {_format_ddmmyy(last_prediction_date)}")
+                uprint(f"Last prediction:   {_format_ddmmyy(last_prediction_date)}")
             else:
-                logger.info(f"Last prediction:   None found")
+                uprint(f"Last prediction:   None found")
             
             # Calculate gap and next date
             if last_prediction_date and last_prediction_date < latest_excel_date:
                 gap_days = (latest_excel_date - last_prediction_date).days
-                logger.warning(f"\n⚠️  Gap detected: {gap_days} days between last prediction and latest data")
-                logger.info(
+                uprint(f"\n⚠️  Gap detected: {gap_days} days between last prediction and latest data")
+                uprint(
                     f"Will backfill: {_format_ddmmyy(last_prediction_date + dt.timedelta(days=1))} "
                     f"to {_format_ddmmyy(latest_excel_date)}"
                 )
@@ -2432,19 +2448,19 @@ def handle_future_generation_mode(args) -> None:
             
             # Next day (future prediction)
             next_day = _next_non_month_end(latest_excel_date + dt.timedelta(days=1))
-            logger.info(f"Next day (future): {_format_ddmmyy(next_day)}")
+            uprint(f"Next day (future): {_format_ddmmyy(next_day)}")
             
-            logger.info("\nWhat would you like to do?")
-            logger.info("  [1] Generate predictions (backfill gap + next day only)")
-            logger.info("  [2] Custom date range (manual input)")
-            logger.info("  [3] Cancel")
+            uprint("\nWhat would you like to do?")
+            uprint("  [1] Generate predictions (backfill gap + next day only)")
+            uprint("  [2] Custom date range (manual input)")
+            uprint("  [3] Cancel")
             
             choice = input("\nEnter choice (1-3): ").strip()
             
             if choice == "1":
                 # Generate backfill + next day
                 if backfill_start and backfill_end:
-                    logger.info(f"\n📅 Generating backfill predictions...")
+                    uprint(f"\n📅 Generating backfill predictions...")
                     generate_future_predictions_range(
                         backfill_start,
                         backfill_end,
@@ -2454,7 +2470,7 @@ def handle_future_generation_mode(args) -> None:
                         scr_retries=args.scr_retries,
                     )
                 
-                logger.info(f"\n📅 Generating next day prediction...")
+                uprint(f"\n📅 Generating next day prediction...")
                 generate_future_predictions_range(
                     next_day,
                     next_day,
@@ -2478,20 +2494,20 @@ def handle_future_generation_mode(args) -> None:
                 )
                 
             elif choice == "3":
-                logger.info("Cancelled")
+                uprint("Cancelled")
                 sys.exit(0)
             else:
-                logger.error("ERROR: Invalid choice")
+                uprint("ERROR: Invalid choice")
                 sys.exit(1)
                 
         except Exception as e:
-            logger.error(f"ERROR: {e}")
+            uprint(f"ERROR: {e}")
             sys.exit(1)
         
         return
     
     # Should not reach here - all cases handled above
-    logger.error("ERROR: Invalid argument combination")
+    uprint("ERROR: Invalid argument combination")
     sys.exit(1)
 
 def get_last_prediction_date() -> Optional[dt.date]:
@@ -2528,26 +2544,26 @@ def generate_future_predictions_range(
 ) -> None:
     """Generate predictions for a specific date range."""
     if not _is_valid_date(start_date) or not _is_valid_date(end_date):
-        logger.error("Bad date inference")
+        uprint("ERROR: Invalid date range")
         return
-    logger.info(f"\n{'='*60}")
-    logger.info(f"FUTURE PREDICTIONS GENERATION")
-    logger.info(f"Starting from: {_format_ddmmyy(start_date)}")
-    logger.info(f"Ending at: {_format_ddmmyy(end_date)}")
-    logger.info(f"{'='*60}")
+    uprint(f"\n{'='*60}")
+    uprint(f"FUTURE PREDICTIONS GENERATION")
+    uprint(f"Starting from: {_format_ddmmyy(start_date)}")
+    uprint(f"Ending at: {_format_ddmmyy(end_date)}")
+    uprint(f"{'='*60}")
     
     # Calculate total days
     total_days = (end_date - start_date).days + 1
     if total_days <= 0:
-        logger.error("ERROR: End date must be on or after start date")
+        uprint("ERROR: End date must be on or after start date")
         return
 
     if dry_run:
-        logger.info("DRY RUN: No files will be written.")
-        logger.info(f"Total days to process: {total_days}")
+        uprint("DRY RUN: No files will be written.")
+        uprint(f"Total days to process: {total_days}")
         return
     
-    logger.info(f"Total days to process: {total_days}")
+    uprint(f"Total days to process: {total_days}")
     
     # Try to load K-AUTO map from historical metrics
     cfg = PnLConfig()
@@ -2575,15 +2591,15 @@ def generate_future_predictions_range(
                     _, loaded_k_auto_map = format_rank_bucket_windows(bet_rows, effective_dates)
                     if loaded_k_auto_map:
                         k_auto_map.update(loaded_k_auto_map)  # Update with loaded values
-                        logger.info(f"K-AUTO limits from historical data: {', '.join([f'{SLOT_NAME_MAP[sid]}={cap}' for sid, cap in k_auto_map.items()])}")
+                        vprint(f"K-AUTO limits from historical data: {', '.join([f'{SLOT_NAME_MAP[sid]}={cap}' for sid, cap in k_auto_map.items()])}")
         
         if not any(v != MAX_PICKS_CAP_DEFAULT for v in k_auto_map.values()):
-            logger.warning(f"⚠️  No historical data available for K-AUTO, using default cap of {MAX_PICKS_CAP_DEFAULT}")
+            vprint(f"⚠️  No historical data available for K-AUTO, using default cap of {MAX_PICKS_CAP_DEFAULT}")
     except Exception as e:
-        logger.warning(f"⚠️  Warning: Could not load K-AUTO map: {e}")
-        logger.info(f"    Using default cap of {MAX_PICKS_CAP_DEFAULT} for all slots")
+        vprint(f"⚠️  Warning: Could not load K-AUTO map: {e}")
+        vprint(f"    Using default cap of {MAX_PICKS_CAP_DEFAULT} for all slots")
     
-    logger.info("-" * 60)
+    uprint("-" * 60)
     
     project_root = Path(__file__).resolve().parent
     processed = 0
@@ -2610,11 +2626,11 @@ def generate_future_predictions_range(
         
         # Skip month-end dates
         if _is_month_end(prediction_date):
-            logger.info(f"SKIP: {prediction_date.strftime('%d-%m-%y')} is month-end")
+            uprint(f"SKIP: {prediction_date.strftime('%d-%m-%y')} is month-end")
             continue
         
-        logger.info(f"\n📅 Day {day_num+1}/{total_days}: Generating predictions for {prediction_date.strftime('%d-%m-%y')}")
-        logger.info("-" * 50)
+        uprint(f"\n📅 Day {day_num+1}/{total_days}: Generating predictions for {prediction_date.strftime('%d-%m-%y')}")
+        uprint("-" * 50)
         
         # Run all scripts
         cutoff_date = prediction_date - dt.timedelta(days=1)
@@ -2644,25 +2660,25 @@ def generate_future_predictions_range(
                 
                 # Print predictions
                 candidates = _strongest_candidates(shortlist)
-                logger.info("\n✅ STRONGEST ANDAR/BAHAR DIGITS")
+                uprint("\n✅ STRONGEST ANDAR/BAHAR DIGITS")
                 for slot_name, number in candidates:
                     tens = number // 10
                     ones = number % 10
-                    logger.info(f"{slot_name} → {number:02d} (tens:{tens}, ones:{ones})")
+                    uprint(f"{slot_name} → {number:02d} (tens:{tens}, ones:{ones})")
                 
-                logger.info("\n📊 FINAL BET NUMBERS")
+                uprint("\n📊 FINAL BET NUMBERS")
                 bet_lines = _slot_bet_lines(shortlist, trim_notes)
                 for line in bet_lines:
-                    logger.info(line)
+                    uprint(line)
                 
-                # Show trimming info
-                if trim_notes:
-                    logger.info(f"\n🔧 Applied K-AUTO caps: {'; '.join(trim_notes)}")
+                # Show trimming info only in verbose mode
+                if trim_notes and VERBOSE_MODE:
+                    vprint(f"\n🔧 Applied K-AUTO caps: {'; '.join(trim_notes)}")
                 
                 # Calculate expected stake
                 total_picks = len(shortlist)
                 expected_stake = total_picks * cfg.cost_per_unit
-                logger.info(f"\n💰 Total Picks: {total_picks} | Expected Stake: ₹{expected_stake:.0f}")
+                uprint(f"\n💰 Total Picks: {total_picks} | Expected Stake: ₹{expected_stake:.0f}")
                 
                 # Save daily report
                 gate_cutoff = _resolve_ab_cutoff_date(prediction_date, ab_cutoff)
@@ -2675,21 +2691,21 @@ def generate_future_predictions_range(
                     gate_snapshot=gate_snapshot,
                     cutoff_date=gate_cutoff,
                 )
-                logger.info(f"✅ Predictions saved for {prediction_date.strftime('%d-%m-%y')}")
+                uprint(f"✅ Predictions saved for {prediction_date.strftime('%d-%m-%y')}")
                 processed += 1
             else:
-                logger.warning(f"⚠️  No predictions generated for {prediction_date.strftime('%d-%m-%y')}")
+                uprint(f"⚠️  No predictions generated for {prediction_date.strftime('%d-%m-%y')}")
                 
         except FileNotFoundError as e:
-            logger.info(f"❌ Error: {e}")
+            uprint(f"❌ Error: {e}")
         except Exception as e:
-            logger.info(f"❌ Unexpected error: {e}")
+            uprint(f"❌ Unexpected error: {e}")
     
-    logger.info(f"\n{'='*60}")
-    logger.info("FUTURE PREDICTIONS GENERATION COMPLETE!")
-    logger.info(f"Successfully generated predictions for {processed} days")
-    logger.info(f"Check folder: {OUTPUT_DIR}")
-    logger.info(f"{'='*60}")
+    uprint(f"\n{'='*60}")
+    uprint("FUTURE PREDICTIONS GENERATION COMPLETE!")
+    uprint(f"Successfully generated predictions for {processed} days")
+    uprint(f"Check folder: {OUTPUT_DIR}")
+    uprint(f"{'='*60}")
     if not dry_run:
         _autopush_if_needed(
             f"Future predictions update {start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
