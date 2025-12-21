@@ -2849,7 +2849,22 @@ def generate_future_predictions_range(
     scr_retries: int = 1,
     legacy_display: bool = False,
 ) -> None:
-    """Generate predictions for a specific date range."""
+    """Generate predictions for a specific date range.
+    
+    When legacy_display=True, displays the complete legacy daily report sections
+    after predictions are generated:
+    - Yesterday's P&L Table
+    - Best Top-K Strategy Yesterday
+    - Andar/Bahar Gate for Next Day
+    - Rank Buckets & K-AUTO (30D)
+    - Tag ROI (30D) & Booster
+    - Cross-Slot Hits (60D)
+    - Hero/Avoid Scripts (30D)
+    - Performance Rollups
+    - Notes Section
+    
+    The report is also saved to reports/daily_report_auto.txt.
+    """
     if not _is_valid_date(start_date) or not _is_valid_date(end_date):
         uprint("ERROR: Invalid date range")
         return
