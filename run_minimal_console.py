@@ -2079,6 +2079,8 @@ Examples:
   py -3.12 run_minimal_console.py --generate-future --rebuild-metrics  # Auto-detect with rebuild
   py -3.12 run_minimal_console.py --generate-future --from 01-04-25 --to 20-12-25  # Custom range
   py -3.12 run_minimal_console.py --generate-future --until 19-07-25  # Auto-detect start, generate up to date
+  py -3.12 run_minimal_console.py --generate-future --until 20-07-25 --display-old-style  # With legacy console display
+  py -3.12 run_minimal_console.py --generate-future --from 17-07-25 --to 20-07-25 --display-old-style  # Custom range with legacy display
   py -3.12 run_minimal_console.py --check-git  # Print git status and exit
         """
     )
@@ -2147,6 +2149,11 @@ Examples:
         type=int,
         default=1,
         help="Retries for SCR2 on non-zero exit or timeout (default: 1)",
+    )
+    parser.add_argument(
+        "--display-old-style",
+        action="store_true",
+        help="Display legacy console sections (Rank buckets, Top-K profit, Tag ROI, Cross-slot hits) for future generation",
     )
     
     args = parser.parse_args()
@@ -2321,6 +2328,7 @@ def handle_future_generation_mode(args) -> None:
                 ab_cutoff=args.ab_cutoff,
                 scr_timeout=args.scr_timeout,
                 scr_retries=args.scr_retries,
+                display_old_style=args.display_old_style,
             )
         except ValueError as e:
             logger.error(f"ERROR: {e}")
@@ -2381,6 +2389,7 @@ def handle_future_generation_mode(args) -> None:
                 ab_cutoff=args.ab_cutoff,
                 scr_timeout=args.scr_timeout,
                 scr_retries=args.scr_retries,
+                display_old_style=args.display_old_style,
             )
         except ValueError as e:
             logger.error(f"ERROR: {e}")
@@ -2452,6 +2461,7 @@ def handle_future_generation_mode(args) -> None:
                         ab_cutoff=args.ab_cutoff,
                         scr_timeout=args.scr_timeout,
                         scr_retries=args.scr_retries,
+                        display_old_style=args.display_old_style,
                     )
                 
                 logger.info(f"\n📅 Generating next day prediction...")
@@ -2462,6 +2472,7 @@ def handle_future_generation_mode(args) -> None:
                     ab_cutoff=args.ab_cutoff,
                     scr_timeout=args.scr_timeout,
                     scr_retries=args.scr_retries,
+                    display_old_style=args.display_old_style,
                 )
                 
             elif choice == "2":
@@ -2475,6 +2486,7 @@ def handle_future_generation_mode(args) -> None:
                     ab_cutoff=args.ab_cutoff,
                     scr_timeout=args.scr_timeout,
                     scr_retries=args.scr_retries,
+                    display_old_style=args.display_old_style,
                 )
                 
             elif choice == "3":
@@ -2525,6 +2537,7 @@ def generate_future_predictions_range(
     ab_cutoff: str = "same",
     scr_timeout: int = 300,
     scr_retries: int = 1,
+    display_old_style: bool = False,
 ) -> None:
     """Generate predictions for a specific date range."""
     if not _is_valid_date(start_date) or not _is_valid_date(end_date):
@@ -2641,6 +2654,52 @@ def generate_future_predictions_range(
                     "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 }
                 _write_metadata(date_folder, metadata)
+                
+                # Display old-style console sections if requested
+                if display_old_style:
+                    # Compute metrics window ending at cutoff_date
+                    window_end = cutoff_date
+                    window_start = window_end - dt.timedelta(days=DEFAULT_WINDOW_DAYS - 1)
+                    
+                    try:
+                        # Build effective dates and load bet rows
+                        results_df = load_results_dataframe()
+                        results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
+                        results_df = results_df[~results_df["DATE"].apply(_is_month_end)]
+                        available_dates = sorted([d for d in results_df["DATE"].dropna().tolist() 
+                                                 if window_start <= d <= window_end])
+                        
+                        effective_dates = build_effective_dates(window_start, window_end, 
+                                                               available_dates=available_dates)
+                        bet_rows = load_clean_bet_rows(window_start, window_end, cfg)
+                        
+                        # Format legacy sections
+                        rank_lines, _ = format_rank_bucket_windows(bet_rows, effective_dates)
+                        _, day_topk_lines = format_topk_profit(
+                            bet_rows, effective_dates=effective_dates, unit_stake=cfg.cost_per_unit
+                        )
+                        tag_lines = format_tag_roi(
+                            bet_rows, effective_dates=effective_dates, unit_stake=cfg.cost_per_unit
+                        )
+                        cross_slot_lines = format_cross_slot_hits(bet_rows, effective_dates=effective_dates)
+                        
+                        # Print legacy sections
+                        print("\n" + "-" * 50)
+                        print("\U0001F4C8 RANK BUCKET WINDOWS")
+                        for line in rank_lines:
+                            print(line)
+                        print("\n\U0001F4B9 TOP-K PROFIT (last window)")
+                        for line in day_topk_lines:
+                            print(line)
+                        print("\n\U0001F3F7\uFE0F TAG ROI")
+                        for line in tag_lines:
+                            print(line)
+                        print("\n\U0001F517 CROSS-SLOT HITS")
+                        for line in cross_slot_lines:
+                            print(line)
+                        print("-" * 50)
+                    except Exception as e:
+                        logger.warning(f"⚠️  Could not display old-style analytics: {e}")
                 
                 # Print predictions
                 candidates = _strongest_candidates(shortlist)
