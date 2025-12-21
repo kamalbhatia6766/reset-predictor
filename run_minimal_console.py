@@ -2283,8 +2283,19 @@ Examples:
         default=1,
         help="Retries for SCR2 on non-zero exit or timeout (default: 1)",
     )
-    parser.add_argument("--legacy-display", action="store_true", default=True,
-        help="Enable old interactive display (metrics prompt + colored ROI banners)")
+    parser.add_argument(
+        "--legacy-display",
+        dest="legacy_display",
+        action="store_true",
+        default=True,
+        help="Enable legacy daily report display with all analytical sections (default: ON)",
+    )
+    parser.add_argument(
+        "--no-legacy-display",
+        dest="legacy_display",
+        action="store_false",
+        help="Disable legacy daily report display",
+    )
     
     args = parser.parse_args()
 
