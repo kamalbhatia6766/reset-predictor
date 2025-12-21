@@ -700,6 +700,51 @@ def _maybe_rebuild_metrics(log_skip: bool = True) -> bool:
     return True
 
 
+def _prompt_date(raw: str, fallback: dt.date) -> dt.date | None:
+    """Parse user input date or return fallback."""
+    if not raw:
+        return fallback
+    try:
+        return parse_ddmmyy(raw)
+    except ValueError:
+        return fallback
+
+
+def rebuild_metrics(start_date: Optional[str] = None, end_date: Optional[str] = None) -> None:
+    """Rebuild metrics with optional date range."""
+    try:
+        results_df = load_results_dataframe()
+        results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
+        slot_columns = list(SLOT_NAME_TO_ID.keys())
+        results_df = results_df.dropna(subset=slot_columns)
+        
+        all_dates = sorted([d for d in results_df["DATE"].unique() if d is not None])
+        if not all_dates:
+            raise ValueError("No dates available for metrics rebuild")
+        
+        # Determine date range
+        if start_date:
+            metrics_start = parse_ddmmyy(start_date)
+        else:
+            # Use last 90 days or all available data
+            if len(all_dates) >= 90:
+                metrics_start = all_dates[-90]
+            else:
+                metrics_start = all_dates[0]
+        
+        if end_date:
+            metrics_end = parse_ddmmyy(end_date)
+        else:
+            metrics_end = all_dates[-1]
+        
+        cfg = PnLConfig()
+        rebuild_prebuilt_metrics(metrics_start, metrics_end, cfg)
+        return metrics_start, metrics_end
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to rebuild metrics: {e}")
+        return None, None
+
+
 def _git_available() -> bool:
     return _resolve_git_exe() is not None
 
@@ -1092,18 +1137,39 @@ def _strongest_candidates(shortlist: pd.DataFrame) -> List[Tuple[str, int]]:
 def _slot_bet_lines(shortlist: pd.DataFrame, trim_notes: List[str]) -> List[str]:
     """Format bet numbers per slot with pick counts."""
     lines = []
+    
+    # Parse trim notes to get original counts
+    trim_info = {}
+    for note in trim_notes:
+        # Example: "FRBD: trimmed 36→20 (K-AUTO)"
+        if "trimmed" in note and "→" in note:
+            parts = note.split(":")
+            if len(parts) >= 2:
+                slot_name = parts[0].strip()
+                # Extract numbers from "trimmed 36→20"
+                num_part = parts[1].strip().split("(")[0].strip()
+                if "→" in num_part:
+                    original, final = num_part.replace("trimmed", "").strip().split("→")
+                    trim_info[slot_name] = (int(original), int(final))
+    
     for slot_name in SLOT_NAME_TO_ID.keys():
         slot_data = shortlist[shortlist["slot"] == slot_name]
         if not slot_data.empty:
-            # Get top numbers for this slot (up to 10 for display)
             num_picks = len(slot_data)
-            display_limit = min(10, num_picks)
-            top_numbers = slot_data.head(display_limit)["number"].tolist()
-            numbers_str = ", ".join([f"{int(n):02d}" for n in top_numbers])
             
-            # Add ellipsis if more numbers exist
-            suffix = f" ... ({num_picks} total)" if num_picks > display_limit else f" ({num_picks} total)"
-            lines.append(f"{slot_name}: {numbers_str}{suffix}")
+            # Get all numbers for this slot (display up to 20)
+            display_limit = min(20, num_picks)
+            top_numbers = slot_data.head(display_limit)["number"].tolist()
+            numbers_str = " ".join([f"{int(n):02d}" for n in top_numbers])
+            
+            # Build the prefix with trimming info
+            if slot_name in trim_info:
+                original, final = trim_info[slot_name]
+                prefix = f"{slot_name} ({final}, trimmed {original}→{final}): "
+            else:
+                prefix = f"{slot_name} ({num_picks}): "
+            
+            lines.append(prefix + numbers_str)
     return lines
 
 def _apply_max_cap(shortlist: pd.DataFrame, k_auto_map: Optional[Dict[int, int]]) -> tuple[pd.DataFrame, List[str]]:
@@ -1548,9 +1614,10 @@ def _render_daily_report(
 ) -> str:
     parts: List[str] = []
 
-    parts.append(_colored_separator("DAILY REPORT", glyph="🟪"))
-    parts.append(stake_line)
-    parts.append("")
+    # Don't add header here - it's added when printing
+    # parts.append(_colored_separator("DAILY REPORT", glyph="🟪"))
+    # parts.append(stake_line)
+    # parts.append("")
 
     if skip_lines:
         parts.extend(skip_lines)
@@ -1584,7 +1651,7 @@ def _render_daily_report(
         parts.append("")
 
     if rollups:
-        parts.append(_colored_separator("ROI BANNERS", glyph="🟩"))
+        parts.append("📈 PERFORMANCE ROLLUPS")
         parts.append("Period      Status  Stake     P&L        ROI")
         parts.append("-------     ------  -----     ----       ---")
         parts.extend(rollups)
@@ -1851,6 +1918,7 @@ def sanity_tests(
 def run_interactive_display(
     scr_timeout: int = 300,
     scr_retries: int = 1,
+    legacy_display: bool = True,
 ) -> None:
     notes: List[str] = []
     with warnings.catch_warnings(record=True) as captured_warnings:
@@ -1868,12 +1936,63 @@ def run_interactive_display(
         prediction_date = _next_non_month_end(latest_date + dt.timedelta(days=1))
 
         cfg = PnLConfig()
-        prebuilt_metrics, prebuilt_notes, window_start, window_end = _handle_prebuilt_metrics(
-            latest_date, aligned_results, cfg
-        )
+        
+        # === LEGACY INTERACTIVE DISPLAY (full restore) ===
+        if legacy_display:
+            print("=" * 60)
+            print("PRECISION PREDICTOR — AUTO DAILY MODE")
+            print("=" * 60)
+            try:
+                metrics_info = _read_prebuilt_info(PREBUILT_DIR)
+                metrics_start, metrics_end = None, None
+                if metrics_info:
+                    metrics_start = metrics_info.get("start")
+                    metrics_end = metrics_info.get("end")
+                
+                stale_metrics, reason = prebuilt_metrics_status(latest_date, PREBUILT_DIR)
+                
+                if stale_metrics:
+                    span = f"[{metrics_start} → {metrics_end}]" if metrics_start and metrics_end else ""
+                    print(f"Prebuilt metrics: [STALE] {span}")
+                    ans = input("Rebuild metrics? (Y/N) [Y]: ").strip().lower()
+                    if ans in ("", "y", "yes"):
+                        start_date = input("Start date? (DD-mm-yy): ").strip() or None
+                        end_date = input("End date? (blank = results file last date): ").strip() or None
+                        result_start, result_end = rebuild_metrics(start_date, end_date)
+                        if result_start and result_end:
+                            span_days = (result_end - result_start).days + 1
+                            print(f"[REBUILT] Rebuilt metrics for {result_start}→{result_end} ({span_days} days)")
+                    else:
+                        print("Skipped rebuild.")
+                else:
+                    print("✅ Metrics already fresh.")
+            except Exception as e:
+                print(f"⚠️ Metrics check skipped due to: {e}")
+            print("-" * 60)
+            
+            # Load metrics for later use
+            prebuilt_metrics = load_prebuilt_metrics(PREBUILT_DIR)
+            # Determine window from metrics or use defaults
+            metrics_info = _read_prebuilt_info(PREBUILT_DIR)
+            if metrics_info and metrics_info.get("start") and metrics_info.get("end"):
+                window_start = _parse_date(metrics_info.get("start"))
+                window_end = _parse_date(metrics_info.get("end"))
+            else:
+                window_fallback_start = latest_date - dt.timedelta(days=max(DEFAULT_WINDOW_DAYS - 1, 0))
+                if aligned_results:
+                    window_start = max(window_fallback_start, min(aligned_results))
+                else:
+                    window_start = window_fallback_start
+                window_end = latest_date
+        else:
+            prebuilt_metrics, prebuilt_notes, window_start, window_end = _handle_prebuilt_metrics(
+                latest_date, aligned_results, cfg
+            )
+            notes.extend(prebuilt_notes)
+        # === END LEGACY INTERACTIVE DISPLAY ===
 
         print(f"\n📅 Generating predictions for {prediction_date:%d-%m-%y}...")
-        print(_colored_separator("RUNNING SCR SCRIPTS", glyph="🟦"))
+        print("-" * 50)
 
         _run_scripts_quietly(
             project_root,
@@ -1999,7 +2118,12 @@ def run_interactive_display(
     _write_text(daily_report_path, daily_report_body)
     _write_text(pnl_path, pnl_summary_body)
 
-    print("\n" + _colored_separator("DAILY REPORT", glyph="🟩"))
+    if legacy_display:
+        print("\n" + "=" * 50)
+        print("DAILY REPORT")
+        print("=" * 50)
+    else:
+        print("\n" + _colored_separator("DAILY REPORT", glyph="🟩"))
     print(daily_report_body)
     print(f"\n✅ Daily report saved to: {daily_report_path}")
 
@@ -2159,6 +2283,8 @@ Examples:
         default=1,
         help="Retries for SCR2 on non-zero exit or timeout (default: 1)",
     )
+    parser.add_argument("--legacy-display", action="store_true", default=True,
+        help="Enable old interactive display (metrics prompt + colored ROI banners)")
     
     args = parser.parse_args()
 
@@ -2212,6 +2338,7 @@ Examples:
         run_interactive_display(
             scr_timeout=args.scr_timeout,
             scr_retries=args.scr_retries,
+            legacy_display=args.legacy_display,
         )
         success = True
 
