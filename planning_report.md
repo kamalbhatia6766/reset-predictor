@@ -5,7 +5,6 @@
 - Removed post-PR91 changes (consensus voting, logger-to-print changes, and follow-on tweaks) by rolling back to the earlier snapshot.
 - Confirmed PR #91 scope remains the current target for ongoing backtest and console behavior.
 - Began locking the generate-future console output template in `run_minimal_console.py` while routing extra status lines to the verbose tail.
-- Added a guard to exit cleanly when the results file is missing or lacks DATE columns.
 
 ## Current Issues / Risks
 - Full backtest execution still depends on local availability of `pandas`/`openpyxl` for replaying historical data in this environment.
