@@ -2283,8 +2283,19 @@ Examples:
         default=1,
         help="Retries for SCR2 on non-zero exit or timeout (default: 1)",
     )
-    parser.add_argument("--legacy-display", action="store_true", default=True,
-        help="Enable old interactive display (metrics prompt + colored ROI banners)")
+    parser.add_argument(
+        "--legacy-display",
+        dest="legacy_display",
+        action="store_true",
+        default=True,
+        help="Enable legacy daily report display with all analytical sections (default: ON)",
+    )
+    parser.add_argument(
+        "--no-legacy-display",
+        dest="legacy_display",
+        action="store_false",
+        help="Disable legacy daily report display",
+    )
     
     args = parser.parse_args()
 
@@ -2464,6 +2475,7 @@ def handle_future_generation_mode(args) -> None:
                 ab_cutoff=args.ab_cutoff,
                 scr_timeout=args.scr_timeout,
                 scr_retries=args.scr_retries,
+                legacy_display=args.legacy_display,
             )
         except ValueError as e:
             logger.error(f"ERROR: {e}")
@@ -2524,6 +2536,7 @@ def handle_future_generation_mode(args) -> None:
                 ab_cutoff=args.ab_cutoff,
                 scr_timeout=args.scr_timeout,
                 scr_retries=args.scr_retries,
+                legacy_display=args.legacy_display,
             )
         except ValueError as e:
             uprint(f"ERROR: {e}")
@@ -2595,6 +2608,7 @@ def handle_future_generation_mode(args) -> None:
                         ab_cutoff=args.ab_cutoff,
                         scr_timeout=args.scr_timeout,
                         scr_retries=args.scr_retries,
+                        legacy_display=args.legacy_display,
                     )
                 
                 uprint(f"\n📅 Generating next day prediction...")
@@ -2605,6 +2619,7 @@ def handle_future_generation_mode(args) -> None:
                     ab_cutoff=args.ab_cutoff,
                     scr_timeout=args.scr_timeout,
                     scr_retries=args.scr_retries,
+                    legacy_display=args.legacy_display,
                 )
                 
             elif choice == "2":
@@ -2618,6 +2633,7 @@ def handle_future_generation_mode(args) -> None:
                     ab_cutoff=args.ab_cutoff,
                     scr_timeout=args.scr_timeout,
                     scr_retries=args.scr_retries,
+                    legacy_display=args.legacy_display,
                 )
                 
             elif choice == "3":
@@ -2661,6 +2677,180 @@ def _get_latest_result_date() -> Optional[dt.date]:
     dates = [d for d in results_df["DATE"].tolist() if _is_valid_date(d)]
     return max(dates) if dates else None
 
+
+def _print_legacy_daily_report_for_future(
+    prediction_date: dt.date,
+    shortlist: pd.DataFrame,
+    trim_notes: List[str],
+    k_auto_map: Dict[int, int],
+    cfg: PnLConfig,
+    results_df: pd.DataFrame,
+    ab_cutoff: str,
+) -> None:
+    """Generate and print the complete legacy daily report for future predictions."""
+    uprint("\n" + "=" * 50)
+    uprint("DAILY REPORT")
+    uprint("=" * 50)
+    
+    # Get result dates and compute windows
+    result_dates = pd.to_datetime(results_df["DATE"], errors="coerce").dropna().dt.date.tolist()
+    aligned_results = [d for d in result_dates if not _is_month_end(d)]
+    
+    if not aligned_results:
+        uprint("⚠️  No historical data available for daily report")
+        return
+    
+    latest_date = max(aligned_results)
+    
+    # Determine window (use last 30 days or all available)
+    window_end = latest_date
+    window_start = window_end - dt.timedelta(days=30)
+    if aligned_results:
+        window_start = max(window_start, min(aligned_results))
+    
+    effective_dates = build_effective_dates(window_start, window_end, available_dates=result_dates)
+    
+    # Load bet history and compute metrics
+    bet_rows = load_clean_bet_rows(window_start, window_end, cfg)
+    
+    if bet_rows.empty:
+        uprint("⚠️  No bet history available for daily report")
+        return
+    
+    # Load prediction history to compute P&L
+    history, _ = _load_prediction_history()
+    
+    if history.empty:
+        uprint("⚠️  No prediction history available for P&L report")
+        return
+    
+    # Filter history to dates with results
+    history_for_results = history[history["date"] <= latest_date]
+    
+    if history_for_results.empty:
+        uprint("⚠️  No historical predictions with results available")
+        return
+    
+    # Compute P&L report
+    report = compute_pnl_report(history_for_results, cfg=cfg)
+    
+    # Get actual results for latest date
+    actual_map: Dict[int, int | None] = {}
+    latest_results = results_df[pd.to_datetime(results_df["DATE"]).dt.date == latest_date]
+    if not latest_results.empty:
+        for slot_name, value in latest_results.iloc[0].items():
+            if slot_name == "DATE":
+                continue
+            slot_id = SLOT_NAME_TO_ID.get(slot_name)
+            if slot_id is None:
+                continue
+            try:
+                actual_map[slot_id] = int(value)
+            except (TypeError, ValueError):
+                actual_map[slot_id] = None
+    
+    # Generate all report sections
+    candidates = _strongest_candidates(shortlist)
+    candidates_map = {name: num for name, num in candidates}
+    
+    # 1. Yesterday's P&L Table
+    ab_gate_lines, gate_map = format_andar_bahar_gating(
+        report.slot_digit_hits, cfg, effective_dates
+    )
+    pnl_table = _format_pnl_table(
+        report.merged,
+        report.hit_notes,
+        actual_map,
+        latest_date,
+        gate_map,
+        candidates_map,
+    )
+    uprint("\n" + pnl_table)
+    
+    # 2. Best Top-K Strategy Yesterday
+    _, day_topk_lines = format_topk_profit(
+        bet_rows, effective_dates=effective_dates, unit_stake=cfg.cost_per_unit
+    )
+    if day_topk_lines:
+        uprint("\n" + "\n".join(day_topk_lines))
+    
+    # 3. Andar/Bahar Gate for Next Day
+    if ab_gate_lines:
+        uprint("\n" + "\n".join(ab_gate_lines))
+    
+    # 4. Rank Buckets & K-AUTO
+    rank_lines, _ = format_rank_bucket_windows(bet_rows, effective_dates)
+    if rank_lines:
+        uprint("\n" + "\n".join(rank_lines))
+    
+    # 5. Tag ROI & Booster
+    tag_lines = format_tag_roi(bet_rows, effective_dates=effective_dates, unit_stake=cfg.cost_per_unit)
+    if tag_lines:
+        uprint("\n" + "\n".join(tag_lines))
+    
+    # 6. Cross-Slot Hits
+    cross_slot_lines = format_cross_slot_hits(bet_rows, effective_dates=effective_dates)
+    if cross_slot_lines:
+        uprint("\n" + "\n".join(cross_slot_lines))
+    
+    # 7. Hero/Avoid Scripts
+    try:
+        prebuilt_metrics = load_prebuilt_metrics(PREBUILT_DIR)
+        if prebuilt_metrics:
+            hero_lines = format_hero_weakest(prebuilt_metrics, min_bets=20)
+            if hero_lines:
+                uprint("\n" + "\n".join(hero_lines))
+    except Exception as e:
+        vprint(f"⚠️  Could not load hero/avoid scripts: {e}")
+    
+    # 8. Performance Rollups
+    rollups = _format_rollups(report.combined_window_totals)
+    if rollups:
+        uprint("\n📈 PERFORMANCE ROLLUPS")
+        uprint("Period      Status  Stake     P&L        ROI")
+        uprint("-------     ------  -----     ----       ---")
+        for line in rollups:
+            uprint(line)
+    
+    # 9. Notes Section
+    notes: List[str] = []
+    try:
+        stale_metrics, reason = prebuilt_metrics_status(latest_date, PREBUILT_DIR)
+        if stale_metrics:
+            notes.append(f"Metrics: {reason}")
+    except Exception:
+        pass
+    
+    if notes:
+        uprint("\n📝 NOTES")
+        for note in notes:
+            uprint(f"• {note}")
+    
+    # Save report to file
+    stake_line = _stake_summary(cfg)
+    present_dates = history_for_results["date"].dropna().tolist()
+    skip_range_lines = _collapse_date_gaps(effective_dates, present_dates, "no predictions logged")
+    
+    daily_report_body = _render_daily_report(
+        pnl_table,
+        day_topk_lines if day_topk_lines else [],
+        rank_lines if rank_lines else [],
+        tag_lines if tag_lines else [],
+        cross_slot_lines if cross_slot_lines else [],
+        ab_gate_lines if ab_gate_lines else [],
+        rollups,
+        hero_lines if 'hero_lines' in locals() and hero_lines else [],
+        stake_line,
+        trim_notes,
+        skip_range_lines,
+        notes,
+    )
+    
+    daily_report_path = Path("reports/daily_report_auto.txt")
+    _write_text(daily_report_path, daily_report_body)
+    uprint(f"\n✅ Daily report saved to: {daily_report_path}")
+
+
 def generate_future_predictions_range(
     start_date: dt.date,
     end_date: dt.date,
@@ -2668,8 +2858,24 @@ def generate_future_predictions_range(
     ab_cutoff: str = "same",
     scr_timeout: int = 300,
     scr_retries: int = 1,
+    legacy_display: bool = False,
 ) -> None:
-    """Generate predictions for a specific date range."""
+    """Generate predictions for a specific date range.
+    
+    When legacy_display=True, displays the complete legacy daily report sections
+    after predictions are generated:
+    - Yesterday's P&L Table
+    - Best Top-K Strategy Yesterday
+    - Andar/Bahar Gate for Next Day
+    - Rank Buckets & K-AUTO (30D)
+    - Tag ROI (30D) & Booster
+    - Cross-Slot Hits (60D)
+    - Hero/Avoid Scripts (30D)
+    - Performance Rollups
+    - Notes Section
+    
+    The report is also saved to reports/daily_report_auto.txt.
+    """
     if not _is_valid_date(start_date) or not _is_valid_date(end_date):
         uprint("ERROR: Invalid date range")
         return
@@ -2692,17 +2898,17 @@ def generate_future_predictions_range(
     
     uprint(f"Total days to process: {total_days}")
     
+    # Load results dataframe (needed for K-AUTO and legacy report)
+    results_df = load_results_dataframe()
+    results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
+    results_df = results_df[~results_df["DATE"].apply(_is_month_end)]
+    
     # Try to load K-AUTO map from historical metrics
     cfg = PnLConfig()
     # Initialize with default values for all slots
     k_auto_map = {slot_id: MAX_PICKS_CAP_DEFAULT for slot_id in SLOT_NAME_MAP.keys()}
     
     try:
-        # Get available historical dates for metrics
-        results_df = load_results_dataframe()
-        results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
-        results_df = results_df[~results_df["DATE"].apply(_is_month_end)]
-        
         if not results_df.empty:
             available_dates = sorted([d for d in results_df["DATE"].dropna().tolist() if d < start_date])
             
@@ -2806,6 +3012,21 @@ def generate_future_predictions_range(
                 total_picks = len(shortlist)
                 expected_stake = total_picks * cfg.cost_per_unit
                 uprint(f"\n💰 Total Picks: {total_picks} | Expected Stake: ₹{expected_stake:.0f}")
+                
+                # Add legacy daily report if requested
+                if legacy_display:
+                    try:
+                        _print_legacy_daily_report_for_future(
+                            prediction_date,
+                            shortlist,
+                            trim_notes,
+                            k_auto_map,
+                            cfg,
+                            results_df,
+                            ab_cutoff,
+                        )
+                    except Exception as e:
+                        vprint(f"⚠️  Warning: Could not generate full daily report: {e}")
                 
                 # Save daily report
                 gate_cutoff = _resolve_ab_cutoff_date(prediction_date, ab_cutoff)
