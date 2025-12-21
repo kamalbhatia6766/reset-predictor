@@ -5,12 +5,13 @@ snapshot with layer performance metrics.
 """
 from __future__ import annotations
 
+import argparse
 import calendar
 import datetime as dt
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 import warnings
 import json
 
@@ -54,6 +55,16 @@ LOG_PATH = Path("logs/run_minimal.log")
 SLOT_NAME_TO_ID = {v: k for k, v in SLOT_NAME_MAP.items()}
 PREBUILT_DIR = Path("reports/prebuilt_metrics")
 DEFAULT_WINDOW_DAYS = 90
+DATE_FORMAT = "%d-%m-%y"
+PREDICTION_PREFIX = "📅 Generating predictions for {date}..."
+SECTION_DIVIDER = "-" * 50
+REPORT_DIVIDER = "=" * 50
+STRONGEST_HEADER = "✅ STRONGEST ANDAR/BAHAR DIGITS (4 slots)"
+FINAL_BET_HEADER = "📊 FINAL BET NUMBERS (4 slots)"
+REPORT_TITLE = "DAILY REPORT"
+ROLLUPS_TITLE = "📈 PERFORMANCE ROLLUPS"
+ROLLUPS_HEADER = "Period      Status  Stake     P&L        ROI"
+ROLLUPS_RULE = "-------     ------  -----     ----       ---"
 
 
 def _run_scripts_quietly(project_root: Path) -> None:
@@ -443,23 +454,16 @@ def _render_daily_report(
     hero_lines: List[str],
     stake_line: str,
     trimmed_notes: List[str],
-    skip_lines: List[str],
-    notes: List[str],
 ) -> str:
     parts: List[str] = []
-    
-    # Add skip lines if any
-    if skip_lines:
-        parts.extend(skip_lines)
-        parts.append("")
-    
+
     # Add P&L table
     parts.append(pnl_table)
     parts.append("")
     
     # Add day top-k strategy
     if day_topk_lines:
-        parts.append(day_topk_lines[0])
+        parts.extend(day_topk_lines)
         parts.append("")
     
     # Add Andar/Bahar gate
@@ -489,18 +493,11 @@ def _render_daily_report(
     
     # Add Rollups
     if rollups:
-        parts.append("📈 PERFORMANCE ROLLUPS")
-        parts.append("Period      Status  Stake     P&L        ROI")
-        parts.append("-------     ------  -----     ----       ---")
+        parts.append(ROLLUPS_TITLE)
+        parts.append(ROLLUPS_HEADER)
+        parts.append(ROLLUPS_RULE)
         parts.extend(rollups)
-        parts.append("")
-    
-    # Add any remaining notes
-    if notes:
-        parts.append("📝 NOTES")
-        for note in notes:
-            parts.append(f"• {note}")
-    
+
     return "\n".join(parts)
 
 
@@ -511,9 +508,19 @@ def _write_text(path: Path, body: str) -> None:
 
 def _prompt_date(raw: str, fallback: dt.date) -> dt.date | None:
     try:
-        return dt.datetime.strptime(raw or fallback.strftime("%d-%m-%y"), "%d-%m-%y").date()
+        return dt.datetime.strptime(raw or fallback.strftime(DATE_FORMAT), DATE_FORMAT).date()
     except ValueError:
         print("SKIP: invalid date format; expected DD-mm-yy")
+        return None
+
+
+def _parse_cli_date(raw: str | None, label: str) -> dt.date | None:
+    if not raw:
+        return None
+    try:
+        return dt.datetime.strptime(raw, DATE_FORMAT).date()
+    except ValueError:
+        print(f"SKIP: invalid {label} date format; expected DD-mm-yy")
         return None
 
 
@@ -569,35 +576,41 @@ def _resolve_rebuild_window(
 
 
 def _handle_prebuilt_metrics(
-    latest_result_date: dt.date, aligned_results: List[dt.date], cfg: PnLConfig
-) -> tuple[dict[str, pd.DataFrame], List[str], dt.date, dt.date]:
+    latest_result_date: dt.date,
+    aligned_results: List[dt.date],
+    cfg: PnLConfig,
+    *,
+    rebuild_metrics: bool,
+    interactive: bool,
+) -> tuple[dict[str, pd.DataFrame], List[str], dt.date, dt.date, List[str]]:
     notes: List[str] = []
+    verbose_lines: List[str] = []
     info = _read_prebuilt_info(PREBUILT_DIR)
     needs_rebuild, reason = prebuilt_metrics_status(latest_result_date, PREBUILT_DIR)
     start_raw_info = info.get("start") if isinstance(info, dict) else None
     end_raw_info = info.get("end") if isinstance(info, dict) else None
     coverage_start = _parse_date(start_raw_info)
     coverage_end = _parse_date(end_raw_info)
-    
-    # FIX B: Replace emojis with ASCII
+
     freshness = "[FRESH]" if not needs_rebuild else "[STALE]"
     if start_raw_info and end_raw_info:
-        print(f"Prebuilt metrics: {freshness} [{start_raw_info} → {end_raw_info}]")
+        verbose_lines.append(f"Prebuilt metrics: {freshness} [{start_raw_info} → {end_raw_info}]")
     else:
-        print(f"Prebuilt metrics: {freshness}")
-    
+        verbose_lines.append(f"Prebuilt metrics: {freshness}")
+
     if needs_rebuild:
         notes.append(f"Metrics: {reason}")
 
-    choice = input("Rebuild metrics? (Y/N) [Y]: ").strip().upper()
-    if not choice:
-        choice = "Y"
-
+    choice = "N"
     start_raw = ""
     end_raw = ""
-    if choice == "Y":
-        start_raw = input("Start date? (DD-mm-yy): ").strip()
-        end_raw = input("End date? (blank = results file last date): ").strip()
+    if interactive:
+        choice = input("Rebuild metrics? (Y/N) [Y]: ").strip().upper() or "Y"
+        if choice == "Y":
+            start_raw = input("Start date? (DD-mm-yy): ").strip()
+            end_raw = input("End date? (blank = results file last date): ").strip()
+    else:
+        choice = "Y" if rebuild_metrics else "N"
 
     window_start, window_end = _resolve_rebuild_window(
         latest_result_date,
@@ -613,23 +626,88 @@ def _handle_prebuilt_metrics(
         metrics = rebuild_prebuilt_metrics(window_start, window_end, cfg)
         if metrics:
             span_days = (window_end - window_start).days + 1
-            # FIX B: Replace emojis with ASCII
-            print(f"[REBUILT] Rebuilt metrics for {window_start}→{window_end} ({span_days} days)")
-            return metrics, notes, window_start, window_end
-    
+            verbose_lines.append(
+                f"[REBUILT] Rebuilt metrics for {window_start}→{window_end} ({span_days} days)"
+            )
+            return metrics, notes, window_start, window_end, verbose_lines
+
     metrics = load_prebuilt_metrics(PREBUILT_DIR)
     if not metrics:
         notes.append("Metrics: No prebuilt data available")
-        print("[WARNING] No prebuilt metrics found")
+        verbose_lines.append("[WARNING] No prebuilt metrics found")
     else:
         span_days = (window_end - window_start).days + 1
-        print(f"📊 Using existing metrics [{window_start} → {window_end} | {span_days} days]")
-    
-    return metrics, notes, window_start, window_end
+        verbose_lines.append(f"📊 Using existing metrics [{window_start} → {window_end} | {span_days} days]")
+
+    return metrics, notes, window_start, window_end, verbose_lines
+
+
+def _collect_future_dates(
+    latest_date: dt.date, start: dt.date | None, end: dt.date | None
+) -> List[dt.date]:
+    fallback_start = _next_non_month_end(latest_date + dt.timedelta(days=1))
+    start_date = start or fallback_start
+    end_date = end or start_date
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    dates: List[dt.date] = []
+    current = start_date
+    while current <= end_date:
+        if not _is_month_end(current):
+            dates.append(current)
+        current += dt.timedelta(days=1)
+    return dates
+
+
+def _build_console_output(
+    prediction_date: dt.date,
+    strongest_lines: Iterable[str],
+    bet_lines: Iterable[str],
+    daily_report_body: str,
+    verbose_lines: Iterable[str],
+) -> str:
+    lines: List[str] = [
+        "",
+        PREDICTION_PREFIX.format(date=prediction_date.strftime(DATE_FORMAT)),
+        SECTION_DIVIDER,
+        "",
+        STRONGEST_HEADER,
+    ]
+    lines.extend(strongest_lines)
+    lines.append("")
+    lines.append(FINAL_BET_HEADER)
+    lines.extend(bet_lines)
+    lines.append("")
+    lines.append(REPORT_DIVIDER)
+    lines.append(REPORT_TITLE)
+    lines.append(REPORT_DIVIDER)
+    lines.append(daily_report_body)
+    if verbose_lines:
+        lines.append("")
+        lines.append("📝 NOTES")
+        for line in verbose_lines:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run prediction scripts and print the daily console report.")
+    parser.add_argument("--generate-future", action="store_true", help="Generate predictions for future dates")
+    parser.add_argument("--rebuild-metrics", action="store_true", help="Rebuild prebuilt metrics non-interactively")
+    parser.add_argument("--from", dest="from_date", help="Start date (DD-mm-yy) for future generation")
+    parser.add_argument("--to", dest="to_date", help="End date (DD-mm-yy) for future generation")
+    parser.add_argument("--until", dest="until_date", help="Generate through this date (DD-mm-yy)")
+    parser.add_argument("--dry-run", action="store_true", help="Skip writing output files or history")
+    parser.add_argument("--verbose", action="store_true", help="Append debug info after rollups")
+    parser.add_argument("--ab-cutoff", dest="ab_cutoff", default="prev", choices=["prev"])
+    return parser.parse_args()
 
 
 def main() -> None:
+    args = _parse_args()
     notes: List[str] = []
+    verbose_lines: List[str] = []
     with warnings.catch_warnings(record=True) as captured_warnings:
         warnings.simplefilter("always", DeprecationWarning)
 
@@ -645,14 +723,13 @@ def main() -> None:
         prediction_date = _next_non_month_end(latest_date + dt.timedelta(days=1))
 
         cfg = PnLConfig()
-        prebuilt_metrics, prebuilt_notes, window_start, window_end = _handle_prebuilt_metrics(
-            latest_date, aligned_results, cfg
+        prebuilt_metrics, prebuilt_notes, window_start, window_end, prebuilt_verbose = _handle_prebuilt_metrics(
+            latest_date,
+            aligned_results,
+            cfg,
+            rebuild_metrics=args.rebuild_metrics,
+            interactive=not args.generate_future and not args.rebuild_metrics,
         )
-
-        print(f"\n📅 Generating predictions for {prediction_date:%d-%m-%y}...")
-        print("-" * 50)
-
-        _run_scripts_quietly(project_root)
 
         effective_dates = build_effective_dates(window_start, window_end, available_dates=result_dates)
 
@@ -664,41 +741,28 @@ def main() -> None:
         tag_lines = format_tag_roi(bet_rows, effective_dates=effective_dates, unit_stake=cfg.cost_per_unit)
         cross_slot_lines = format_cross_slot_hits(bet_rows, effective_dates=effective_dates)
 
-        prediction_files_missing = False
+        shortlist_missing = False
+        history_missing = False
+        shortlist = pd.DataFrame(
+            columns=["slot", "number", "rank", "score", "votes", "sources", "tier", "in_top"]
+        )
+        if not args.dry_run:
+            _run_scripts_quietly(project_root)
         try:
             shortlist = _load_shortlist()
         except FileNotFoundError:
-            prediction_files_missing = True
-            shortlist = pd.DataFrame(
-                columns=["slot", "number", "rank", "score", "votes", "sources", "tier", "in_top"]
-            )
+            shortlist_missing = True
 
         shortlist, trimmed_notes = _apply_max_cap(shortlist, k_auto_map)
-        if not prediction_files_missing and not shortlist.empty:
-            _save_shortlist_with_history(shortlist, prediction_date)
 
         candidates = _strongest_candidates(shortlist)
         candidates_map = {name: num for name, num in candidates}
-        
-        # Print predictions section
-        print("\n✅ STRONGEST ANDAR/BAHAR DIGITS")
-        for slot_name, number in candidates:
-            tens = number // 10
-            ones = number % 10
-            print(f"{slot_name} → {number:02d} (tens:{tens}, ones:{ones})")
-        
-        print("\n📊 FINAL BET NUMBERS")
-        bet_lines = _slot_bet_lines(shortlist, trimmed_notes)
-        for line in bet_lines:
-            print(line)
 
-        preds = _prepare_predictions(shortlist, prediction_date)
-        history, missing_history_file = _load_prediction_history()
-        prediction_files_missing = prediction_files_missing or missing_history_file
-        history = _append_history(history, preds)
+        preds_history, history_missing = _load_prediction_history()
+        prediction_files_missing = shortlist_missing or history_missing
 
         # Evaluate only for dates where actual results exist
-        history_for_results = history[history["date"] <= latest_date]
+        history_for_results = preds_history[preds_history["date"] <= latest_date]
         report = compute_pnl_report(history_for_results, cfg=cfg)
         actual_map: Dict[int, int | None] = {}
         latest_results = results_df[pd.to_datetime(results_df["DATE"]).dt.date == latest_date]
@@ -728,12 +792,11 @@ def main() -> None:
         )
         rollups = _format_rollups(report.combined_window_totals)
         notes.extend(prebuilt_notes)
-        
-        # Get hero lines
+
         hero_lines = []
         if prebuilt_metrics:
             hero_lines = format_hero_weakest(prebuilt_metrics, min_bets=20)
-        
+
         stake_line = _stake_summary(cfg)
 
         present_dates = history_for_results["date"].dropna().tolist()
@@ -747,6 +810,7 @@ def main() -> None:
         cross_slot_lines = [line for line in cross_slot_lines if line]
         hero_lines = [line for line in hero_lines if line]
         ab_gate_lines = [line for line in ab_gate_lines if line]
+        skip_range_lines = [line for line in skip_range_lines if line]
 
     for warning in captured_warnings:
         if issubclass(warning.category, DeprecationWarning):
@@ -763,22 +827,56 @@ def main() -> None:
         hero_lines,
         stake_line,
         trimmed_notes,
-        skip_range_lines,
-        notes,
     )
     
     pnl_summary_body = render_compact_report(report)
 
+    if args.verbose:
+        verbose_lines.extend(prebuilt_verbose)
+        verbose_lines.extend(skip_range_lines)
+        verbose_lines.extend(notes)
+
     daily_report_path = Path("reports/daily_report_auto.txt")
     pnl_path = Path("logs/pnl/pnl_summary_auto.txt")
-    _write_text(daily_report_path, daily_report_body)
-    _write_text(pnl_path, pnl_summary_body)
+    if not args.dry_run:
+        _write_text(daily_report_path, daily_report_body)
+        _write_text(pnl_path, pnl_summary_body)
 
-    print("\n" + "="*50)
-    print("DAILY REPORT")
-    print("="*50)
-    print(daily_report_body)
-    print("\n✅ Daily report saved to: reports/daily_report_auto.txt")
+    strongest_lines = [
+        f"{slot_name} → {number:02d} (tens:{number // 10}, ones:{number % 10})"
+        for slot_name, number in candidates
+    ]
+    bet_lines = _slot_bet_lines(shortlist, trimmed_notes)
+
+    target_start = _parse_cli_date(args.from_date, "--from")
+    target_end = _parse_cli_date(args.to_date, "--to")
+    until_date = _parse_cli_date(args.until_date, "--until")
+    if args.generate_future:
+        if until_date:
+            target_start = target_start or None
+            target_end = until_date
+        prediction_dates = _collect_future_dates(latest_date, target_start, target_end)
+    else:
+        prediction_dates = [prediction_date]
+
+        if args.generate_future and not prediction_dates:
+            print("SKIP: no prediction dates available")
+            return
+
+    for idx, target_date in enumerate(prediction_dates):
+        if not args.dry_run and not shortlist_missing and not shortlist.empty:
+            _save_shortlist_with_history(shortlist, target_date)
+            preds = _prepare_predictions(shortlist, target_date)
+            preds_history = _append_history(preds_history, preds)
+
+        console_body = _build_console_output(
+            target_date,
+            strongest_lines,
+            bet_lines,
+            daily_report_body,
+            verbose_lines if args.verbose else [],
+        )
+        print(console_body)
 
 
 if __name__ == "__main__":
