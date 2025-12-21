@@ -713,6 +713,9 @@ def main() -> None:
 
         project_root = Path(__file__).resolve().parent
         results_df = load_results_dataframe()
+        if results_df.empty or "DATE" not in results_df.columns:
+            print("SKIP: No usable result dates available")
+            return
         result_dates = pd.to_datetime(results_df["DATE"], errors="coerce").dropna().dt.date.tolist()
         aligned_results = [d for d in result_dates if not _is_month_end(d)]
         if not aligned_results:
