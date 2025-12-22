@@ -376,7 +376,11 @@ def _format_daily_pnl_table(daily_data: Dict) -> List[str]:
     
     return lines
 
-def _calculate_correct_performance_rollups(target_date: dt.date, cfg: PnLConfig) -> List[str]:
+def _calculate_correct_performance_rollups(
+    target_date: dt.date,
+    cfg: PnLConfig,
+    expected_day_stake: Optional[float] = None,
+) -> List[str]:
     """Calculate correct performance rollups using historical data."""
     lines = []
     
@@ -388,66 +392,107 @@ def _calculate_correct_performance_rollups(target_date: dt.date, cfg: PnLConfig)
     available_dates = [d for d in results_df["DATE"].tolist() if isinstance(d, dt.date)]
     effective_dates = build_effective_dates(start_date, target_date, available_dates=available_dates)
 
-    daily_data: List[Dict] = []
+    predictions: List[pd.DataFrame] = []
     for day in effective_dates:
         try:
             shortlist = _load_shortlist_for_date(day)
         except FileNotFoundError:
             continue
         preds = _prepare_predictions(shortlist, day)
-        if preds.empty:
-            continue
-        gate_snapshot = compute_ab_gate_snapshot(day - dt.timedelta(days=1))
-        summary = compute_daily_pnl_summary(
-            preds,
-            day,
-            cfg,
-            gate_by_day={day: gate_snapshot},
-        )
-        if summary:
-            daily_data.append(summary)
-    
-    if not daily_data:
+        if not preds.empty:
+            predictions.append(preds)
+
+    if not predictions:
         lines.append("\n📈 PERFORMANCE ROLLUPS")
         lines.append("No historical data available")
         return lines
 
-    daily_data.sort(key=lambda entry: entry["date"])
-    
-    # Calculate windows
-    windows = []
-    
-    # Day window (target_date)
-    day_entry = next((entry for entry in daily_data if entry["date"] == target_date), None)
-    if day_entry:
-        day_stake = day_entry["totals"]["stake"]
-        day_pnl = day_entry["totals"]["pnl"]
-        day_roi = (day_pnl / day_stake * 100) if day_stake > 0 else 0
-        windows.append(("Day", day_stake, day_pnl, day_roi))
-    
-    # 7D window
-    seven_days_ago = target_date - dt.timedelta(days=6)
-    week_entries = [entry for entry in daily_data if entry["date"] >= seven_days_ago]
-    if week_entries:
-        week_stake = sum(entry["totals"]["stake"] for entry in week_entries)
-        week_pnl = sum(entry["totals"]["pnl"] for entry in week_entries)
-        week_roi = (week_pnl / week_stake * 100) if week_stake > 0 else 0
-        windows.append(("7D", week_stake, week_pnl, week_roi))
-    
-    # 30D window
-    thirty_days_ago = target_date - dt.timedelta(days=29)
-    month_entries = [entry for entry in daily_data if entry["date"] >= thirty_days_ago]
-    if month_entries:
-        month_stake = sum(entry["totals"]["stake"] for entry in month_entries)
-        month_pnl = sum(entry["totals"]["pnl"] for entry in month_entries)
-        month_roi = (month_pnl / month_stake * 100) if month_stake > 0 else 0
-        windows.append(("30D", month_stake, month_pnl, month_roi))
-    
-    # Cumulative window (all data)
-    cumulative_stake = sum(entry["totals"]["stake"] for entry in daily_data)
-    cumulative_pnl = sum(entry["totals"]["pnl"] for entry in daily_data)
-    cumulative_roi = (cumulative_pnl / cumulative_stake * 100) if cumulative_stake > 0 else 0
-    windows.append(("Cumulative", cumulative_stake, cumulative_pnl, cumulative_roi))
+    predictions_df = pd.concat(predictions, ignore_index=True)
+    predictions_df["date"] = pd.to_datetime(predictions_df["date"], errors="coerce").dt.date
+    preds_for_report = predictions_df[predictions_df["date"] <= target_date]
+    if available_dates:
+        preds_for_report = preds_for_report[preds_for_report["date"].isin(set(available_dates))]
+
+    if preds_for_report.empty:
+        lines.append("\n📈 PERFORMANCE ROLLUPS")
+        lines.append("No historical data available")
+        return lines
+
+    gate_snapshot = compute_ab_gate_snapshot(target_date - dt.timedelta(days=1))
+    pnl_report = compute_pnl_report(
+        preds_for_report,
+        cfg,
+        gate_by_day={target_date: gate_snapshot},
+    )
+
+    def summarize_windows(merged: pd.DataFrame) -> List[Tuple[str, float, float, float]]:
+        if merged.empty:
+            return []
+
+        merged_dates = pd.to_datetime(merged["date"], errors="coerce").dt.date
+        merged = merged.assign(date=merged_dates)
+
+        day_totals = (
+            merged.groupby("date")[["cost", "pnl"]]
+            .sum()
+            .reset_index()
+            .sort_values("date")
+        )
+
+        windows: List[Tuple[str, float, float, float]] = []
+
+        day_entry = day_totals[day_totals["date"] == target_date]
+        if not day_entry.empty:
+            day_stake = float(day_entry["cost"].iloc[0])
+            day_pnl = float(day_entry["pnl"].iloc[0])
+            day_roi = (day_pnl / day_stake * 100) if day_stake > 0 else 0
+            windows.append(("Day", day_stake, day_pnl, day_roi))
+
+        seven_days_ago = target_date - dt.timedelta(days=6)
+        week_entries = day_totals[day_totals["date"] >= seven_days_ago]
+        if not week_entries.empty:
+            week_stake = float(week_entries["cost"].sum())
+            week_pnl = float(week_entries["pnl"].sum())
+            week_roi = (week_pnl / week_stake * 100) if week_stake > 0 else 0
+            windows.append(("7D", week_stake, week_pnl, week_roi))
+
+        thirty_days_ago = target_date - dt.timedelta(days=29)
+        month_entries = day_totals[day_totals["date"] >= thirty_days_ago]
+        if not month_entries.empty:
+            month_stake = float(month_entries["cost"].sum())
+            month_pnl = float(month_entries["pnl"].sum())
+            month_roi = (month_pnl / month_stake * 100) if month_stake > 0 else 0
+            windows.append(("30D", month_stake, month_pnl, month_roi))
+
+        cumulative_stake = float(day_totals["cost"].sum())
+        cumulative_pnl = float(day_totals["pnl"].sum())
+        cumulative_roi = (cumulative_pnl / cumulative_stake * 100) if cumulative_stake > 0 else 0
+        windows.append(("Cumulative", cumulative_stake, cumulative_pnl, cumulative_roi))
+
+        return windows
+
+    windows = summarize_windows(pnl_report.merged)
+    if not windows:
+        lines.append("\n📈 PERFORMANCE ROLLUPS")
+        lines.append("No historical data available")
+        return lines
+
+    if expected_day_stake and windows:
+        day_window = next((entry for entry in windows if entry[0] == "Day"), None)
+        if day_window:
+            day_stake = day_window[1]
+            if expected_day_stake > 0 and (
+                day_stake > expected_day_stake * 2
+                or expected_day_stake > day_stake * 2
+            ):
+                preds_for_day = preds_for_report[preds_for_report["date"] == target_date]
+                if not preds_for_day.empty:
+                    pnl_report = compute_pnl_report(
+                        preds_for_day,
+                        cfg,
+                        gate_by_day={target_date: gate_snapshot},
+                    )
+                    windows = summarize_windows(pnl_report.merged)
     
     # Format output
     lines.append("\n📈 PERFORMANCE ROLLUPS")
@@ -575,7 +620,11 @@ def generate_detailed_daily_report(prediction_date: dt.date, cfg: PnLConfig) -> 
             pass
         
         # Add Performance Rollups (FIXED)
-        rollup_lines = _calculate_correct_performance_rollups(prev_date, cfg)
+        rollup_lines = _calculate_correct_performance_rollups(
+            prev_date,
+            cfg,
+            expected_day_stake=daily_data["totals"]["stake"],
+        )
         report_lines.extend(rollup_lines)
         
         # Add notes
