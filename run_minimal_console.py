@@ -352,18 +352,28 @@ def _format_daily_pnl_table(daily_data: Dict) -> List[str]:
     lines.append("----    ------  -----  -----  ------   ----    ---      --    ------")
     
     slot_data = daily_data["slot_data"]
+    digit_pnl = daily_data["pnl_report"].digit_pnl.copy()
+    if "date" in digit_pnl.columns:
+        digit_pnl = digit_pnl[digit_pnl["date"] == daily_data["date"]]
     totals = daily_data["totals"]
     
     for slot_name in ["FRBD", "GZBD", "GALI", "DSWR"]:
         if slot_name in slot_data:
             data = slot_data[slot_name]
-            hit_marker = " [HIT]" if data["hit"] else " [MISS]"
+            slot_id = SLOT_NAME_TO_ID[slot_name]
+            slot_ab = digit_pnl[digit_pnl["slot"] == slot_id]
+            ab_return = slot_ab["payout"].sum() if not slot_ab.empty else 0.0
+            ab_label = " [HIT]" if ab_return > 0 else " [MISS]"
+            if ab_label == " [HIT]" and data["ab_pnl"] <= 0:
+                ab_label = " [MISS]"
+            elif ab_label == " [MISS]" and data["ab_pnl"] > 0:
+                ab_label = " [HIT]"
             lines.append(
                 f"{slot_name:<6}  {data['actual']:02d}  "
                 f"{data['picks']:>5}  {data['stake']:>5.0f}  "
                 f"{data['return']:>6.0f}  {data['pnl']:>+5.0f}  "
                 f"{data['roi']:>+5.0f}%  "
-                f"{data['ab_status']:>3}  {data['ab_pnl']:>+5.0f}{hit_marker}"
+                f"{data['ab_status']:>3}  {data['ab_pnl']:>+5.0f}{ab_label}"
             )
     
     # Total line with proper spacing
