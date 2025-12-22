@@ -1,21 +1,16 @@
 # Planning Report
 
 ## Progress Update
-- Reverted the working tree to the PR #91 baseline so the interactive daily console display and legacy reporting flows are restored.
-- Removed post-PR91 changes (consensus voting, logger-to-print changes, and follow-on tweaks) by rolling back to the earlier snapshot.
-- Confirmed PR #91 scope remains the current target for ongoing backtest and console behavior.
-- Began locking the generate-future console output template in `run_minimal_console.py` while routing extra status lines to the verbose tail.
+- Centralized daily P&L calculations into `bet_pnl_tracker.compute_daily_pnl_summary` and wired generate-future/backtest to reuse the same engine.
+- Adjusted generate-future performance rollups to sum the same daily P&L series used in the “YESTERDAY’S P&L” block, avoiding mismatched rollup sources.
+- Kept console output formatting intact while switching daily/backtest math to the shared helper.
 
 ## Current Issues / Risks
 - Full backtest execution still depends on local availability of `pandas`/`openpyxl` for replaying historical data in this environment.
 - Historic generation relies on scr1–scr9 honoring the shared cutoff environment variable; needs runtime validation in the target environment.
 - AB gate computation depends on prediction history availability in `scr9_shortlist_history.csv`; missing history may mute AB staking.
-- Windows scheduled task installation requires running `tools/install_scheduler.cmd` once with appropriate permissions.
-- Rollback to PR #91 means any post-rollback fixes must be re-applied deliberately if they are still required.
-- Generate-future relies on prebuilt metrics availability; if prebuilt files are missing, verbose warnings will be the only clue unless metrics are rebuilt.
+- Rollup reconstruction now depends on saved per-day shortlists; missing daily folders will skip those days in rollups.
 
 ## Roadmap (Next Steps)
-- Re-run `py -3.12 run_minimal_console.py --backtest --last 3 --verbose` to confirm PR #91 baseline behavior is intact.
-- Validate `py -3.12 run_minimal_console.py --generate-future --until 21-07-25 --verbose` on the reverted build for range accuracy.
-- Re-check any previously expected self-tests or ROI banners to ensure they match the PR #91 behavior.
-- Execute the new generate-future commands (`--rebuild-metrics`, `--from/--to`, `--until`) to confirm the locked output headers stay byte-for-byte.
+- Run the specified backtest/generate-future commands to confirm daily P&L and rollups align for the same dates.
+- Spot-check rollups for dates with missing saved shortlists to ensure the skips are acceptable and messaging remains clear.

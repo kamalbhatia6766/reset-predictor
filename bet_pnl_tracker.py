@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import json
 import sys
@@ -1592,6 +1592,98 @@ def compute_pnl_report(
     )
 
 
+def compute_daily_pnl_summary(
+    predictions: pd.DataFrame,
+    target_date: date,
+    cfg: Optional[PnLConfig] = None,
+    gate_by_day: Optional[Dict[date, Dict[int, bool]]] = None,
+) -> Optional[Dict[str, Any]]:
+    cfg = cfg or PnLConfig()
+    if predictions.empty:
+        return None
+
+    preds = predictions.copy()
+    if "date" in preds.columns:
+        preds["date"] = pd.to_datetime(preds["date"], errors="coerce").dt.date
+        preds = preds[preds["date"] == target_date]
+    if preds.empty:
+        return None
+
+    pnl_report = compute_pnl_report(preds, cfg, gate_by_day=gate_by_day)
+    if pnl_report.merged.empty:
+        return None
+
+    merged = pnl_report.merged.copy()
+    digit_pnl = pnl_report.digit_pnl.copy()
+    if "date" in merged.columns:
+        merged = merged[merged["date"] == target_date]
+    if "date" in digit_pnl.columns:
+        digit_pnl = digit_pnl[digit_pnl["date"] == target_date]
+
+    if merged.empty and digit_pnl.empty:
+        return None
+
+    slot_data: Dict[str, Dict[str, Any]] = {}
+    for slot_id, slot_name in SLOT_NAME_MAP.items():
+        slot_preds = merged[merged["slot"] == slot_id]
+        if slot_preds.empty:
+            continue
+
+        stake = slot_preds["cost"].sum()
+        returns = slot_preds["payout"].sum()
+        pnl = slot_preds["pnl"].sum()
+        actual = int(slot_preds.iloc[0]["actual"]) if pd.notna(slot_preds.iloc[0]["actual"]) else None
+        hit = bool(slot_preds["hit"].any())
+        picks = len(slot_preds)
+        roi = (pnl / stake * 100) if stake > 0 else 0.0
+
+        slot_ab = digit_pnl[digit_pnl["slot"] == slot_id]
+        ab_pnl = slot_ab["pnl"].sum() if not slot_ab.empty else 0.0
+        ab_status = "AB" if not slot_ab.empty and slot_ab["cost"].sum() > 0 else "-"
+
+        slot_data[slot_name] = {
+            "actual": actual,
+            "picks": picks,
+            "stake": stake,
+            "return": returns,
+            "pnl": pnl,
+            "roi": roi,
+            "ab_status": ab_status,
+            "ab_pnl": ab_pnl,
+            "hit": hit,
+        }
+
+    total_stake = merged["cost"].sum() if not merged.empty else 0.0
+    total_return = merged["payout"].sum() if not merged.empty else 0.0
+    total_pnl = merged["pnl"].sum() if not merged.empty else 0.0
+    total_roi = (total_pnl / total_stake * 100) if total_stake > 0 else 0.0
+    total_picks = len(merged)
+    total_hits = int(merged["hit"].sum()) if not merged.empty else 0
+
+    ab_stake = digit_pnl["cost"].sum() if not digit_pnl.empty else 0.0
+    ab_return = digit_pnl["payout"].sum() if not digit_pnl.empty else 0.0
+    ab_pnl = digit_pnl["pnl"].sum() if not digit_pnl.empty else 0.0
+    ab_hits = int(digit_pnl["andar_hit"].sum() + digit_pnl["bahar_hit"].sum()) if not digit_pnl.empty else 0
+
+    return {
+        "date": target_date,
+        "slot_data": slot_data,
+        "totals": {
+            "picks": total_picks,
+            "stake": total_stake,
+            "return": total_return,
+            "pnl": total_pnl,
+            "roi": total_roi,
+            "ab_stake": ab_stake,
+            "ab_return": ab_return,
+            "ab_pnl": ab_pnl,
+            "ab_hits": ab_hits,
+            "hits": total_hits,
+        },
+        "pnl_report": pnl_report,
+    }
+
+
 def render_compact_report(report: PnLReport) -> str:
     """Return a human-readable compact string summary."""
 
@@ -1777,6 +1869,7 @@ def _cli_rebuild_all():
 __all__ = [
     "PnLConfig",
     "PnLReport",
+    "compute_daily_pnl_summary",
     "compute_pnl_report",
     "render_compact_report",
     "build_effective_dates",

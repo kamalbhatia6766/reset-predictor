@@ -25,6 +25,7 @@ from bet_pnl_tracker import (
     PnLConfig,
     SLOT_NAME_MAP,
     build_effective_dates,
+    compute_daily_pnl_summary,
     compute_pnl_report,
     format_andar_bahar_gating,
     format_hero_weakest,
@@ -328,76 +329,14 @@ def _calculate_daily_pnl_for_date(target_date: dt.date, cfg: PnLConfig) -> Optio
         if preds.empty:
             return None
         
-        # Compute P&L report
         cutoff_date = target_date - dt.timedelta(days=1)
         gate_snapshot = compute_ab_gate_snapshot(cutoff_date)
-        pnl_report = compute_pnl_report(preds, cfg, gate_by_day={target_date: gate_snapshot})
-        
-        # Extract accurate data
-        merged = pnl_report.merged
-        digit_pnl = pnl_report.digit_pnl
-        
-        # Calculate per-slot metrics
-        slot_data = {}
-        total_picks = 0
-        total_stake = 0
-        total_return = 0
-        total_pnl = 0
-        total_ab_pnl = 0
-        total_hits = 0
-        
-        for slot_id, slot_name in SLOT_NAME_MAP.items():
-            slot_preds = merged[merged["slot"] == slot_id]
-            if not slot_preds.empty:
-                picks = len(slot_preds)
-                stake = picks * cfg.cost_per_unit
-                returns = slot_preds["payout"].sum()
-                pnl = slot_preds["pnl"].sum()
-                actual = int(slot_preds.iloc[0]["actual"]) if pd.notna(slot_preds.iloc[0]["actual"]) else None
-                hit = any(slot_preds["hit"])
-                
-                # AB P&L for this slot
-                slot_ab = digit_pnl[digit_pnl["slot"] == slot_id]
-                ab_pnl = slot_ab["pnl"].sum() if not slot_ab.empty else 0
-                ab_status = "AB" if not slot_ab.empty and slot_ab["cost"].sum() > 0 else "-"
-                
-                slot_data[slot_name] = {
-                    "actual": actual,
-                    "picks": picks,
-                    "stake": stake,
-                    "return": returns,
-                    "pnl": pnl,
-                    "roi": (pnl / stake * 100) if stake > 0 else 0,
-                    "ab_status": ab_status,
-                    "ab_pnl": ab_pnl,
-                    "hit": hit
-                }
-                
-                total_picks += picks
-                total_stake += stake
-                total_return += returns
-                total_pnl += pnl
-                total_ab_pnl += ab_pnl
-                if hit:
-                    total_hits += 1
-        
-        # Calculate overall ROI
-        total_roi = (total_pnl / total_stake * 100) if total_stake > 0 else 0
-        
-        return {
-            "date": target_date,
-            "slot_data": slot_data,
-            "totals": {
-                "picks": total_picks,
-                "stake": total_stake,
-                "return": total_return,
-                "pnl": total_pnl,
-                "roi": total_roi,
-                "ab_pnl": total_ab_pnl,
-                "hits": total_hits
-            },
-            "pnl_report": pnl_report
-        }
+        return compute_daily_pnl_summary(
+            preds,
+            target_date,
+            cfg,
+            gate_by_day={target_date: gate_snapshot},
+        )
         
     except Exception as e:
         print(f"Error calculating P&L for {target_date}: {e}")
@@ -443,57 +382,70 @@ def _calculate_correct_performance_rollups(target_date: dt.date, cfg: PnLConfig)
     
     # Load historical data for last 60 days (to ensure we have enough for 30D)
     start_date = target_date - dt.timedelta(days=60)
-    hist_rows = load_clean_bet_rows(start_date, target_date, cfg)
+    results_df = load_results_dataframe()
+    results_df["DATE"] = pd.to_datetime(results_df["DATE"], errors="coerce").dt.date
+    results_df = results_df[~results_df["DATE"].apply(_is_month_end)]
+    available_dates = [d for d in results_df["DATE"].tolist() if isinstance(d, dt.date)]
+    effective_dates = build_effective_dates(start_date, target_date, available_dates=available_dates)
+
+    daily_data: List[Dict] = []
+    for day in effective_dates:
+        try:
+            shortlist = _load_shortlist_for_date(day)
+        except FileNotFoundError:
+            continue
+        preds = _prepare_predictions(shortlist, day)
+        if preds.empty:
+            continue
+        gate_snapshot = compute_ab_gate_snapshot(day - dt.timedelta(days=1))
+        summary = compute_daily_pnl_summary(
+            preds,
+            day,
+            cfg,
+            gate_by_day={day: gate_snapshot},
+        )
+        if summary:
+            daily_data.append(summary)
     
-    if hist_rows.empty:
+    if not daily_data:
         lines.append("\n📈 PERFORMANCE ROLLUPS")
         lines.append("No historical data available")
         return lines
-    
-    # Group by date and calculate daily totals
-    daily_totals = hist_rows.groupby("date").agg({
-        "cost": "sum",
-        "payout": "sum"
-    }).reset_index()
-    
-    daily_totals["pnl"] = daily_totals["payout"] - daily_totals["cost"]
-    daily_totals["roi"] = (daily_totals["pnl"] / daily_totals["cost"] * 100).fillna(0)
-    
-    # Sort by date
-    daily_totals = daily_totals.sort_values("date")
+
+    daily_data.sort(key=lambda entry: entry["date"])
     
     # Calculate windows
     windows = []
     
     # Day window (target_date)
-    day_data = daily_totals[daily_totals["date"] == target_date]
-    if not day_data.empty:
-        day_stake = day_data["cost"].sum()
-        day_pnl = day_data["pnl"].sum()
-        day_roi = day_data["roi"].mean() if day_stake > 0 else 0
+    day_entry = next((entry for entry in daily_data if entry["date"] == target_date), None)
+    if day_entry:
+        day_stake = day_entry["totals"]["stake"]
+        day_pnl = day_entry["totals"]["pnl"]
+        day_roi = (day_pnl / day_stake * 100) if day_stake > 0 else 0
         windows.append(("Day", day_stake, day_pnl, day_roi))
     
     # 7D window
     seven_days_ago = target_date - dt.timedelta(days=6)
-    week_data = daily_totals[daily_totals["date"] >= seven_days_ago]
-    if not week_data.empty:
-        week_stake = week_data["cost"].sum()
-        week_pnl = week_data["pnl"].sum()
+    week_entries = [entry for entry in daily_data if entry["date"] >= seven_days_ago]
+    if week_entries:
+        week_stake = sum(entry["totals"]["stake"] for entry in week_entries)
+        week_pnl = sum(entry["totals"]["pnl"] for entry in week_entries)
         week_roi = (week_pnl / week_stake * 100) if week_stake > 0 else 0
         windows.append(("7D", week_stake, week_pnl, week_roi))
     
     # 30D window
     thirty_days_ago = target_date - dt.timedelta(days=29)
-    month_data = daily_totals[daily_totals["date"] >= thirty_days_ago]
-    if not month_data.empty:
-        month_stake = month_data["cost"].sum()
-        month_pnl = month_data["pnl"].sum()
+    month_entries = [entry for entry in daily_data if entry["date"] >= thirty_days_ago]
+    if month_entries:
+        month_stake = sum(entry["totals"]["stake"] for entry in month_entries)
+        month_pnl = sum(entry["totals"]["pnl"] for entry in month_entries)
         month_roi = (month_pnl / month_stake * 100) if month_stake > 0 else 0
         windows.append(("30D", month_stake, month_pnl, month_roi))
     
     # Cumulative window (all data)
-    cumulative_stake = daily_totals["cost"].sum()
-    cumulative_pnl = daily_totals["pnl"].sum()
+    cumulative_stake = sum(entry["totals"]["stake"] for entry in daily_data)
+    cumulative_pnl = sum(entry["totals"]["pnl"] for entry in daily_data)
     cumulative_roi = (cumulative_pnl / cumulative_stake * 100) if cumulative_stake > 0 else 0
     windows.append(("Cumulative", cumulative_stake, cumulative_pnl, cumulative_roi))
     
@@ -777,32 +729,28 @@ def run_backtest_date_range(
     # Calculate daily results with accurate AB calculations
     daily_results: List[BacktestDayResult] = []
     for date in sorted(predictions_df["date"].unique()):
-        day_preds = pnl_report.merged[pnl_report.merged["date"] == date]
-        day_ab = pnl_report.digit_pnl[pnl_report.digit_pnl["date"] == date]
-        
-        stake = day_preds["cost"].sum() if not day_preds.empty else 0
-        returns = day_preds["payout"].sum() if not day_preds.empty else 0
-        pnl = returns - stake
-        roi = (pnl / stake * 100) if stake > 0 else 0
-        hits = int(day_preds["hit"].sum()) if not day_preds.empty else 0
-        
-        # Calculate AB metrics correctly
-        ab_stake = day_ab["cost"].sum() if not day_ab.empty else 0
-        ab_returns = day_ab["payout"].sum() if not day_ab.empty else 0
-        ab_pnl = ab_returns - ab_stake
-        ab_hits = int((day_ab["andar_hit"].sum() + day_ab["bahar_hit"].sum())) if not day_ab.empty else 0
-        
+        gate_snapshot = gate_by_day.get(date, {})
+        daily_summary = compute_daily_pnl_summary(
+            predictions_df,
+            date,
+            cfg,
+            gate_by_day={date: gate_snapshot},
+        )
+        if not daily_summary:
+            continue
+        totals = daily_summary["totals"]
+
         daily_results.append(BacktestDayResult(
             date=date,
-            stake=stake,
-            returns=returns,
-            pnl=pnl,
-            roi=roi,
-            hits=hits,
-            ab_stake=ab_stake,
-            ab_returns=ab_returns,
-            ab_pnl=ab_pnl,
-            ab_hits=ab_hits
+            stake=totals["stake"],
+            returns=totals["return"],
+            pnl=totals["pnl"],
+            roi=totals["roi"],
+            hits=totals["hits"],
+            ab_stake=totals["ab_stake"],
+            ab_returns=totals["ab_return"],
+            ab_pnl=totals["ab_pnl"],
+            ab_hits=totals["ab_hits"],
         ))
     
     # Calculate slot results
