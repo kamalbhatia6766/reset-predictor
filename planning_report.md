@@ -6,6 +6,7 @@
 - Kept console output formatting intact while switching daily/backtest math to the shared helper.
 - Resliced generate-future rollups using per-day shortlists and `compute_pnl_report` with an explicit cutoff filter so daily rollups align with the prior-day context.
 - Added a silent guard to re-slice rollups when the day stake diverges sharply from the daily table totals.
+- Corrected DAILY REPORT AB HIT/MISS labeling to derive from AB payout/P&L rather than base bet hits.
 
 ## Current Issues / Risks
 - Full backtest execution still depends on local availability of `pandas`/`openpyxl` for replaying historical data in this environment.
@@ -13,8 +14,10 @@
 - AB gate computation depends on prediction history availability in `scr9_shortlist_history.csv`; missing history may mute AB staking.
 - Rollup reconstruction now depends on saved per-day shortlists; missing daily folders will skip those days in rollups.
 - Daily rollups still rely on saved shortlists through `predictions/deepseek_scr9`; missing or malformed snapshots can reduce window accuracy.
+- AB HIT/MISS labels still depend on digit_pnl entries being present for each slot; missing slot_digit_hits rows will result in default MISS labels.
 
 ## Roadmap (Next Steps)
 - Run the specified backtest/generate-future commands to confirm daily P&L and rollups align for the same dates.
 - Spot-check rollups for dates with missing saved shortlists to ensure the skips are acceptable and messaging remains clear.
 - Validate that the daily rollup guard does not mask legitimate spikes when day stakes legitimately jump above the usual range.
+- Verify AB HIT/MISS labels now match AB P&L signs in the DAILY REPORT output.
